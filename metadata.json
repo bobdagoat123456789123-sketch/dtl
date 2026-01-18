@@ -1,0 +1,7 @@
+{
+  "name": "Predictive Traffic Dashboard",
+  "description": "A high-performance traffic monitoring and routing dashboard using Google Maps and Gemini AI for historical trend analysis and predictive route scoring.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
