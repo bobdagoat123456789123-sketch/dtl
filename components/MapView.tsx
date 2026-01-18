@@ -1,99 +1,116 @@
 
 import React, { useEffect, useRef } from 'react';
-import { setOptions, importLibrary } from '@googlemaps/js-api-loader';
+import L from 'leaflet';
 import { LatLng, RouteData } from '../types';
-import { GOOGLE_MAPS_STYLING } from '../constants';
 
 interface MapViewProps {
   routes: RouteData[];
   selectedRouteId: string | null;
   center: LatLng;
+  startMarker: LatLng | null;
+  endMarker: LatLng | null;
 }
 
-export const MapView: React.FC<MapViewProps> = ({ routes, selectedRouteId, center }) => {
-  const mapRef = useRef<HTMLDivElement>(null);
-  const googleMapRef = useRef<any>(null);
-  const polylinesRef = useRef<any[]>([]);
-  const geometryLibRef = useRef<any>(null);
+export const MapView: React.FC<MapViewProps> = ({ routes, selectedRouteId, center, startMarker, endMarker }) => {
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const layersRef = useRef<L.LayerGroup | null>(null);
+
+  const getTrafficColor = (route: RouteData) => {
+    const current = parseInt(route.duration);
+    const historical = parseInt(route.durationHistorical);
+    const ratio = current / historical;
+    if (ratio > 1.3) return '#ef4444'; 
+    if (ratio > 1.1) return '#f59e0b';
+    return '#22c55e';
+  };
 
   useEffect(() => {
-    const initMap = async () => {
-      if (!mapRef.current) return;
+    if (!mapContainerRef.current) return;
 
-      setOptions({
-        apiKey: process.env.API_KEY || '',
-        version: 'weekly'
-      });
+    mapRef.current = L.map(mapContainerRef.current, {
+      zoomControl: false,
+      attributionControl: false
+    }).setView([center.lat, center.lng], 12);
 
-      try {
-        const { Map, TrafficLayer } = await importLibrary('maps') as any;
-        const geometry = await importLibrary('geometry') as any;
-        geometryLibRef.current = geometry;
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png').addTo(mapRef.current);
+    layersRef.current = L.layerGroup().addTo(mapRef.current);
 
-        if (!googleMapRef.current) {
-          // IMPORTANT: Do not add mapId here. 
-          // ApiProjectMapError is caused by using a Map ID not associated with the project/key.
-          // Using 'styles' provides custom styling without needing a cloud-hosted Map ID.
-          googleMapRef.current = new Map(mapRef.current, {
-            center,
-            zoom: 11,
-            styles: GOOGLE_MAPS_STYLING,
-            disableDefaultUI: true,
-            zoomControl: true,
-            // Confine viewport to Bengaluru area
-            restriction: {
-              latLngBounds: {
-                north: 13.15,
-                south: 12.80,
-                west: 77.40,
-                east: 77.80,
-              },
-              strictBounds: false,
-            },
-          });
-
-          const trafficLayer = new TrafficLayer();
-          trafficLayer.setMap(googleMapRef.current);
-        }
-      } catch (error) {
-        console.error("Error loading Google Maps:", error);
-      }
-    };
-
-    initMap();
+    return () => { mapRef.current?.remove(); };
   }, []);
 
   useEffect(() => {
-    if (googleMapRef.current) {
-      googleMapRef.current.panTo(center);
-    }
-  }, [center]);
+    if (!mapRef.current || !layersRef.current) return;
 
-  useEffect(() => {
-    if (!googleMapRef.current || !geometryLibRef.current) return;
+    layersRef.current.clearLayers();
+    const bounds = L.latLngBounds([]);
 
-    // Clear previous polylines from the map instance
-    polylinesRef.current.forEach(p => p.setMap(null));
-    polylinesRef.current = [];
-
-    // Render the decoded polylines for each route
-    routes.forEach(route => {
-      const isSelected = route.id === selectedRouteId;
-      const google = (window as any).google;
-      if (!google || !google.maps) return;
-
-      const polyline = new google.maps.Polyline({
-        path: geometryLibRef.current.encoding.decodePath(route.polyline.encodedPolyline),
-        geodesic: true,
-        strokeColor: isSelected ? '#3b82f6' : '#94a3b8',
-        strokeOpacity: isSelected ? 1.0 : 0.6,
-        strokeWeight: isSelected ? 6 : 4,
-        zIndex: isSelected ? 100 : 1,
-        map: googleMapRef.current
+    // 1. Add Start/End Markers
+    if (startMarker) {
+      const startIco = L.divIcon({
+        html: `<div class="w-6 h-6 bg-blue-600 border-2 border-white rounded-full shadow-lg flex items-center justify-center text-[8px] font-black text-white">S</div>`,
+        className: '',
+        iconSize: [24, 24]
       });
-      polylinesRef.current.push(polyline);
-    });
-  }, [routes, selectedRouteId]);
+      L.marker([startMarker.lat, startMarker.lng], { icon: startIco }).addTo(layersRef.current);
+      bounds.extend([startMarker.lat, startMarker.lng]);
+    }
 
-  return <div ref={mapRef} className="w-full h-full" />;
+    if (endMarker) {
+      const endIco = L.divIcon({
+        html: `<div class="w-6 h-6 bg-red-600 border-2 border-white rounded-full shadow-lg flex items-center justify-center text-[8px] font-black text-white">E</div>`,
+        className: '',
+        iconSize: [24, 24]
+      });
+      L.marker([endMarker.lat, endMarker.lng], { icon: endIco }).addTo(layersRef.current);
+      bounds.extend([endMarker.lat, endMarker.lng]);
+    }
+
+    // 2. Draw Routes
+    const sortedRoutes = [...routes].sort((a, b) => (a.id === selectedRouteId ? 1 : -1));
+
+    sortedRoutes.forEach(route => {
+      const isSelected = route.id === selectedRouteId;
+      const points = decodePolyline(route.polyline.encodedPolyline);
+      const trafficColor = getTrafficColor(route);
+      
+      if (isSelected) {
+        L.polyline(points, { color: trafficColor, weight: 12, opacity: 0.2 }).addTo(layersRef.current!);
+      }
+
+      const polyline = L.polyline(points, {
+        color: trafficColor,
+        weight: isSelected ? 6 : 3,
+        opacity: isSelected ? 1 : 0.3,
+        lineCap: 'round',
+      }).addTo(layersRef.current!);
+
+      if (isSelected) {
+        polyline.bringToFront();
+        polyline.getBounds().isValid() && bounds.extend(polyline.getBounds());
+      }
+    });
+
+    if (bounds.isValid()) {
+      mapRef.current.fitBounds(bounds, { padding: [120, 120], animate: true });
+    }
+  }, [routes, selectedRouteId, startMarker, endMarker]);
+
+  return <div ref={mapContainerRef} className="w-full h-full" />;
 };
+
+function decodePolyline(encoded: string): [number, number][] {
+  let index = 0, len = encoded.length;
+  let lat = 0, lng = 0;
+  const array: [number, number][] = [];
+  while (index < len) {
+    let b, shift = 0, result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lat += ((result & 1) ? ~(result >> 1) : (result >> 1));
+    shift = 0; result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lng += ((result & 1) ? ~(result >> 1) : (result >> 1));
+    array.push([lat * 1e-5, lng * 1e-5]);
+  }
+  return array;
+}
